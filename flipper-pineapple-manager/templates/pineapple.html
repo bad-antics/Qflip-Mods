@@ -1,0 +1,95 @@
+{% extends "bootstrap/base.html" %}
+{% block title %}WiFi Pineapple Control{% endblock %}
+{% block content %}
+{% include 'nav.html' %}
+<div class="container mt-4">
+  <h1>WiFi Pineapple Management</h1>
+  <div id="status" class="card mb-3">
+    <div class="card-body">
+      <h5>Real-Time Status</h5>
+      <pre id="status-output"></pre>
+      <button class="btn btn-primary" onclick="refreshPineappleStatus()">Refresh</button>
+    </div>
+  </div>
+  <div class="card mb-3">
+    <div class="card-body">
+      <h5>Logs</h5>
+      <button class="btn btn-info" onclick="getPineappleLogs()">Fetch Logs</button>
+      <pre id="logs-output"></pre>
+    </div>
+  </div>
+  <div class="card mb-3">
+    <div class="card-body">
+      <h5>Notifications</h5>
+      <button class="btn btn-info" onclick="getPineappleNotifications()">Fetch Notifications</button>
+      <pre id="notifs-output"></pre>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-body">
+      <h5>Customize PineAP Settings</h5>
+      <form id="pineap-form">
+        <div class="form-check">
+          <input type="checkbox" id="enablePineAP" checked>
+          <label for="enablePineAP">Enable PineAP</label>
+        </div>
+        <div class="form-check">
+          <input type="checkbox" id="karma">
+          <label for="karma">Enable Karma</label>
+        </div>
+        <!-- Add more settings -->
+        <button type="submit" class="btn btn-success mt-2">Apply</button>
+      </form>
+      <pre id="settings-output"></pre>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-body">
+      <h5>Quick Actions</h5>
+      <button class="btn btn-warning" onclick="pineappleAction('/api/reboot', 'POST')">Reboot</button>
+      <button class="btn btn-danger" onclick="pineappleAction('/api/shutdown', 'POST')">Shutdown</button>
+      <!-- Add more -->
+    </div>
+  </div>
+</div>
+<script>
+function refreshPineappleStatus() {
+  fetch('/pineapple_status').then(res => res.json()).then(data => {
+    document.getElementById('status-output').textContent = JSON.stringify(data, null, 2);
+  });
+}
+function getPineappleLogs() {
+  fetch('/pineapple_logs').then(res => res.json()).then(data => {
+    document.getElementById('logs-output').textContent = JSON.stringify(data, null, 2);
+  });
+}
+function getPineappleNotifications() {
+  fetch('/pineapple_notifications').then(res => res.json()).then(data => {
+    document.getElementById('notifs-output').textContent = JSON.stringify(data, null, 2);
+  });
+}
+function pineappleAction(endpoint, method) {
+  fetch('/pineapple_status')  // Reuse status as example; adjust for actual actions
+    .then(res => res.json()).then(data => {
+      document.getElementById('settings-output').textContent = JSON.stringify(data, null, 2);
+    });
+}
+document.getElementById('pineap-form').addEventListener('submit', e => {
+  e.preventDefault();
+  const data = {
+    enablePineAP: document.getElementById('enablePineAP').checked,
+    karma: document.getElementById('karma').checked
+    // Add more
+  };
+  fetch('/pineapple_settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(data)
+  }).then(res => res.json()).then(result => {
+    document.getElementById('settings-output').textContent = JSON.stringify(result, null, 2);
+  });
+});
+refreshPineappleStatus();  // Initial load
+setInterval(refreshPineappleStatus, 5000);  // Poll every 5s
+</script>
+{% endblock %}

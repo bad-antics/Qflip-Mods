@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>{% block title %}Device Manager{% endblock %}</title>
+    {% bootstrap.load_css() %}
+    <style>
+      body { min-height: 100vh; display: flex; flex-direction: column; background: #f8f9fa; }
+      main { flex: 1; }
+    </style>
+</head>
+<body>
+    {% include 'nav.html' %}
+    <main class="container mt-4">{% block content %}{% endblock %}</main>
+    {% include 'footer.html' %}
+    {% bootstrap.load_js() %}
+</body>
+</html>
