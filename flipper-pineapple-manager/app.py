@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, session
+from flask import Flask, render_template, request, jsonify, session, has_request_context
 from flask_bootstrap import Bootstrap
 import serial
 import requests
@@ -98,7 +98,10 @@ def with_flipper(func):
     def wrapper(*args, **kwargs):
         if not flipper_connected:
             if not connect_flipper():
-                return jsonify({'error': 'Flipper Zero not connected'}), 503
+                # If we're in a request context, return an HTTP response; otherwise raise to let non-request callers handle
+                if has_request_context():
+                    return jsonify({'error': 'Flipper Zero not connected'}), 503
+                raise RuntimeError('Flipper Zero not connected')
         try:
             return func(*args, **kwargs)
         except Exception as e:
@@ -109,7 +112,9 @@ def with_flipper(func):
                 threading.Thread(target=connect_flipper, daemon=True).start()
             except Exception:
                 logger.debug('Failed to start reconnect thread')
-            return jsonify({'error': str(e)}), 500
+            if has_request_context():
+                return jsonify({'error': str(e)}), 500
+            raise
     return wrapper
 
 @with_flipper
