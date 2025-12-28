@@ -40,6 +40,49 @@
       <pre id="command-output"></pre>
     </div>
   </div>
+  <div class="card mb-3">
+    <div class="card-body">
+      <h5>File Explorer</h5>
+      <div class="d-flex mb-2">
+        <input type="text" class="form-control" id="fs-path" value="/ext" placeholder="Path (e.g., /ext)">
+        <div class="dropdown ms-2">
+          <button class="btn btn-outline-light dropdown-toggle" type="button" data-bs-toggle="dropdown">Options</button>
+          <ul class="dropdown-menu">
+            <li><a class="dropdown-item" href="#" onclick="navigateUp()">Go Up</a></li>
+            <li><a class="dropdown-item" href="#" onclick="refreshFs()">Refresh</a></li>
+            <li><a class="dropdown-item" href="#" onclick="shareCurrentPath()">Share Path</a></li>
+          </ul>
+        </div>
+        <button class="btn btn-primary ms-2" onclick="refreshFs()">List</button>
+      </div>
+      <div id="fs-list" class="p-2" style="background:#020518;color:#9ff;min-height:140px"></div>
+      <div class="mt-3">
+        <input type="text" class="form-control" id="fs-file" placeholder="Select entry from list for actions">
+        <div class="btn-group mt-2">
+          <button class="btn btn-info" onclick="viewFile()">View</button>
+          <button class="btn btn-success" onclick="downloadFile()">Download</button>
+          <button class="btn btn-danger" onclick="deleteFile()">Delete</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="modal" tabindex="-1" id="fileModal">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content" style="background:#0a0f1a;color:#eee">
+        <div class="modal-header">
+          <h5 class="modal-title" id="fileModalTitle">File Preview</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <pre id="fileModalBody" style="white-space:pre-wrap"></pre>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+          <button type="button" class="btn btn-success" onclick="downloadFile()">Download</button>
+        </div>
+      </div>
+    </div>
+  </div>
   <div class="card">
     <div class="card-body">
       <h5>Quick Actions</h5>
@@ -264,5 +307,71 @@ document.getElementById('raw-tx-form').addEventListener('submit', e => {
 });
 updateConnectionStatus();
 setInterval(updateConnectionStatus, 5000);
+
+// File Explorer logic
+function refreshFs() {
+  const p = document.getElementById('fs-path').value.trim() || '/ext';
+  fetch(`/flipper_fs/list?path=${encodeURIComponent(p)}`).then(r=>r.json()).then(d=>{
+    const listEl = document.getElementById('fs-list');
+    if (d.error) { listEl.textContent = d.error; return; }
+    const entries = (d.entries||[]).filter(x=>x && !/^storage list/.test(x) && x !== '>:' );
+    if (!entries.length) { listEl.textContent = 'No entries or unsupported firmware.'; return; }
+    const base = p.endsWith('/')? p : (p + '/');
+    listEl.innerHTML = entries.map(x=>{
+      const isDir = x.startsWith('[D]');
+      const name = x.replace(/^\[.[^\]]*\]\s*/, '').trim();
+      const full = base + name;
+      const click = isDir ? `document.getElementById('fs-path').value='${full}'; refreshFs();` : `document.getElementById('fs-file').value='${name}';`;
+      return `<div><a href="#" onclick="${click}">${isDir? '📁' : '📄'} ${name}</a></div>`;
+    }).join('');
+  }).catch(()=>{ document.getElementById('fs-list').textContent = 'Network error'; });
+}
+function navigateUp() {
+  let p = document.getElementById('fs-path').value.trim() || '/';
+  if (p === '/' || p === '') return;
+  const parts = p.split('/').filter(Boolean);
+  parts.pop();
+  const up = '/' + parts.join('/');
+  document.getElementById('fs-path').value = up || '/';
+  refreshFs();
+}
+function shareCurrentPath() {
+  const p = document.getElementById('fs-path').value.trim();
+  navigator.clipboard?.writeText(p);
+}
+function selectFromList(name) {
+  document.getElementById('fs-file').value = name;
+}
+function viewFile() {
+  const name = document.getElementById('fs-file').value.trim();
+  let base = document.getElementById('fs-path').value.trim() || '/';
+  if (!name) return;
+  const full = base.endsWith('/') ? (base + name) : (base + '/' + name);
+  fetch(`/flipper_fs/read?path=${encodeURIComponent(full)}`).then(r=>r.json()).then(d=>{
+    const title = document.getElementById('fileModalTitle');
+    const body = document.getElementById('fileModalBody');
+    title.textContent = full;
+    body.textContent = d.content || '(empty or unsupported)';
+    const modal = new bootstrap.Modal(document.getElementById('fileModal'));
+    modal.show();
+  });
+}
+function downloadFile() {
+  const name = document.getElementById('fs-file').value.trim();
+  let base = document.getElementById('fs-path').value.trim() || '/';
+  if (!name) return;
+  const full = base.endsWith('/') ? (base + name) : (base + '/' + name);
+  window.location.href = `/flipper_fs/download?path=${encodeURIComponent(full)}`;
+}
+function deleteFile() {
+  const name = document.getElementById('fs-file').value.trim();
+  let base = document.getElementById('fs-path').value.trim() || '/';
+  if (!name) return;
+  const full = base.endsWith('/') ? (base + name) : (base + '/' + name);
+  fetch('/flipper_fs/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({path: full})})
+    .then(r=>r.json()).then(()=>refreshFs());
+}
+// Initial load
+refreshFs();
 </script>
 {% endblock %}

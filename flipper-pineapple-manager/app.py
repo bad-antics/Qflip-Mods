@@ -1,4 +1,5 @@
 from flask import Flask, render_template, request, jsonify, session, has_request_context
+from flask import Response
 from flask_bootstrap import Bootstrap
 import serial
 import requests
@@ -7,6 +8,9 @@ from datetime import datetime
 import logging
 from functools import wraps
 import os
+import subprocess
+import re
+import ipaddress
 
 app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'change_this_secret_key_in_production')
@@ -29,6 +33,78 @@ AUTO_CONNECT_INTERVAL = int(os.getenv('AUTO_CONNECT_INTERVAL', '10'))  # seconds
 PINEAPPLE_URL = os.getenv('PINEAPPLE_URL', 'http://172.16.42.1:1471')
 PINEAPPLE_USERNAME = os.getenv('PINEAPPLE_USER', 'root')
 PINEAPPLE_PASSWORD = os.getenv('PINEAPPLE_PASS', 'your_password_here')
+
+# Internal cache for Pineapple URL probing
+_pineapple_url_last_probe = 0.0
+
+def _probe_pineapple(base_url: str, timeout: float = 3.0) -> bool:
+    """Return True if Pineapple API appears reachable at base_url."""
+    try:
+        # status endpoint is lightweight; fallback to root if needed
+        u = f"{base_url}/api/status" if not base_url.endswith('/api/status') else base_url
+        r = requests.get(u, timeout=timeout)
+        return r.status_code == 200 or r.status_code in (401, 403)
+    except Exception:
+        return False
+
+def _discover_windows_pineapple_candidates() -> list:
+    """On Windows, parse ipconfig to detect 172.16.X.0/24 USB/RNDIS networks and return likely base URLs.
+    Prefers the classic 172.16.42.1 but also considers any 172.16.<octet>.1 observed.
+    """
+    cands = []
+    try:
+        out = subprocess.check_output(['ipconfig'], text=True, timeout=5, errors='ignore')
+        # Find IPv4 addresses; if any are in 172.16.X.0/24, assume device is 172.16.X.1
+        for m in re.finditer(r'IPv4 Address[^:]*:\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})', out):
+            ip = m.group(1)
+            try:
+                addr = ipaddress.ip_address(ip)
+                if addr in ipaddress.ip_network('172.16.0.0/16'):
+                    octets = ip.split('.')
+                    base = f"http://{octets[0]}.{octets[1]}.{octets[2]}.1"
+                    if f"{base}:1471" not in cands:
+                        cands.append(f"{base}:1471")
+                    if base not in cands:
+                        cands.append(base)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    # Always include common defaults to try
+    if 'http://172.16.42.1:1471' not in cands:
+        cands.append('http://172.16.42.1:1471')
+    if 'http://172.16.42.1' not in cands:
+        cands.append('http://172.16.42.1')
+    return cands
+
+def ensure_pineapple_url(force: bool = False) -> str:
+    """Ensure `PINEAPPLE_URL` points to a reachable Pineapple API. Attempts quick discovery on Windows.
+    Returns the selected base URL (may be unchanged).
+    """
+    global PINEAPPLE_URL, _pineapple_url_last_probe
+    now = time.time()
+    if not force and (now - _pineapple_url_last_probe) < 30:
+        return PINEAPPLE_URL
+    # Try the current value first
+    if _probe_pineapple(PINEAPPLE_URL):
+        _pineapple_url_last_probe = now
+        return PINEAPPLE_URL
+    # Build candidate list
+    candidates = []
+    if os.name == 'nt':
+        candidates.extend(_discover_windows_pineapple_candidates())
+    else:
+        candidates.extend(['http://172.16.42.1:1471', 'http://172.16.42.1'])
+    # Probe candidates
+    for base in candidates:
+        if _probe_pineapple(base):
+            with _state_lock:
+                PINEAPPLE_URL = base
+            _pineapple_url_last_probe = now
+            logger.info('Detected Pineapple base URL: %s', base)
+            return base
+    _pineapple_url_last_probe = now
+    return PINEAPPLE_URL
 
 # Optional: load local config if exists
 if os.path.exists('config.py'):
@@ -147,10 +223,12 @@ def get_pineapple_token():
             return pineapple_token
 
     # If nothing yet, try to fetch a token (non-session) and store globally
+    # Ensure base URL is sane before attempting login
+    ensure_pineapple_url()
     try:
         resp = requests.post(f'{PINEAPPLE_URL}/api/login',
                              json={'username': PINEAPPLE_USERNAME, 'password': PINEAPPLE_PASSWORD},
-                             timeout=5)
+                             timeout=8)
         if resp.status_code == 200:
             try:
                 data = resp.json()
@@ -163,6 +241,24 @@ def get_pineapple_token():
                 logger.error('Pineapple login returned non-JSON response')
     except Exception as e:
         logger.error(f"Pineapple login failed: {e}")
+        # Retry once after forced discovery
+        try:
+            ensure_pineapple_url(force=True)
+            resp = requests.post(f'{PINEAPPLE_URL}/api/login',
+                                 json={'username': PINEAPPLE_USERNAME, 'password': PINEAPPLE_PASSWORD},
+                                 timeout=8)
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                    token = data.get('token')
+                    if token:
+                        with _state_lock:
+                            pineapple_token = token
+                        return token
+                except ValueError:
+                    logger.error('Pineapple login returned non-JSON response (retry)')
+        except Exception as e2:
+            logger.error('Pineapple forced discovery/login retry failed: %s', e2)
     return None
 
 def pineapple_api_call(endpoint, method='GET', data=None, timeout=10):
@@ -198,14 +294,18 @@ def _auto_connect_worker():
                 logger.debug('Auto-connect: attempting flipper connection')
                 connect_flipper()
             if AUTO_CONNECT_PINEAPPLE:
-                # Try to get a token and store globally
+                # Refresh URL and try to get a token and store globally
+                try:
+                    ensure_pineapple_url()
+                except Exception:
+                    pass
                 t = None
                 try:
                     t = get_pineapple_token()
                 except Exception:
                     t = None
                 if t:
-                    logger.debug('Auto-connect: pineappple auth succeeded')
+                    logger.debug('Auto-connect: pineapple auth succeeded')
             time.sleep(AUTO_CONNECT_INTERVAL)
         except Exception as e:
             logger.error('Auto-connect worker error: %s', e)
@@ -373,6 +473,81 @@ def pineapple_notifications():
 @app.route('/pineapple_settings', methods=['POST'])
 def pineapple_settings():
     return jsonify(pineapple_api_call('/api/pineap/settings', 'PUT', request.json))
+
+@app.route('/status/pineapple_network')
+def pineapple_network_status():
+    """Diagnostics for Pineapple network auto-discovery and reachability."""
+    ensure_pineapple_url()
+    reachable = _probe_pineapple(PINEAPPLE_URL)
+    return jsonify({'pineapple_url': PINEAPPLE_URL, 'reachable': reachable})
+
+# Flipper FS helpers and endpoints
+def _try_fs_list(path: str) -> str:
+    for cmd in [f'storage list {path}', f'ls {path}', 'storage list', 'ls']:
+        try:
+            out = send_flipper_command(cmd)
+            if out and isinstance(out, str) and out.strip():
+                return out
+        except Exception:
+            continue
+    return ''
+
+def _try_fs_read(path: str) -> str:
+    for cmd in [f'storage read {path}', f'cat {path}']:
+        try:
+            out = send_flipper_command(cmd)
+            if out and isinstance(out, str):
+                return out
+        except Exception:
+            continue
+    return ''
+
+def _try_fs_delete(path: str) -> str:
+    for cmd in [f'storage delete {path}', f'rm {path}']:
+        try:
+            out = send_flipper_command(cmd)
+            if out and isinstance(out, str):
+                return out
+        except Exception:
+            continue
+    return ''
+
+@app.route('/flipper_fs/list')
+def flipper_fs_list():
+    path = request.args.get('path', '/ext').strip() or '/ext'
+    out = _try_fs_list(path)
+    entries = [line.strip() for line in out.splitlines() if line.strip()] if out else []
+    return jsonify({'path': path, 'entries': entries, 'raw': out})
+
+@app.route('/flipper_fs/read')
+def flipper_fs_read():
+    path = request.args.get('path', '').strip()
+    if not path:
+        return jsonify({'error': 'Path required'}), 400
+    out = _try_fs_read(path)
+    return jsonify({'path': path, 'content': out})
+
+@app.route('/flipper_fs/delete', methods=['POST'])
+def flipper_fs_delete():
+    data = request.get_json(silent=True) or {}
+    path = str(data.get('path', '')).strip()
+    if not path:
+        return jsonify({'error': 'Path required'}), 400
+    out = _try_fs_delete(path)
+    if not out:
+        return jsonify({'error': 'Delete failed or unsupported'}), 500
+    return jsonify({'path': path, 'result': out})
+
+@app.route('/flipper_fs/download')
+def flipper_fs_download():
+    path = request.args.get('path', '').strip()
+    if not path:
+        return jsonify({'error': 'Path required'}), 400
+    content = _try_fs_read(path)
+    if content == '':
+        return jsonify({'error': 'Read failed'}), 500
+    filename = path.split('/')[-1] or 'flipper_file.txt'
+    return Response(content, headers={'Content-Disposition': f'attachment; filename="{filename}"'})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
