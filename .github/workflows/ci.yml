@@ -1,0 +1,58 @@
+name: CI - tests
+
+on:
+  push:
+    branches: [ main, 'feature/**', 'chore/**' ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (pytest)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [ '3.9', '3.10', '3.11' ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('**/requirements.txt') }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f "flipper-pineapple-manager/requirements.txt" ]; then
+            python -m pip install -r flipper-pineapple-manager/requirements.txt
+          fi
+
+      - name: Run tests
+        env:
+          PYTHONPATH: .
+        run: |
+          if [ -d "flipper-pineapple-manager/tests" ]; then
+            python -m pytest -q flipper-pineapple-manager/tests
+          else
+            echo "No tests found; skipping"
+          fi
+
+      - name: Upload test report (optional)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results-${{ matrix.python-version }}
+          path: .
