@@ -10,8 +10,11 @@ permissions:
   pull-requests: write
 
 jobs:
-  update-deps:
+  generate:
+    name: Generate updated requirements
     runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,38 +30,100 @@ jobs:
         run: python -m pip install --upgrade pip pip-tools
 
       - name: Generate updated requirements
+        id: check
         run: |
+          set -e
           pushd flipper-pineapple-manager
           python -m pip install --upgrade -r requirements.txt || true
           python -m pip freeze > requirements.txt.new
           if diff -u requirements.txt requirements.txt.new >/dev/null 2>&1; then
             echo "No updates"
+            echo "changed=false" >> $GITHUB_OUTPUT
+            popd
             exit 0
           fi
           mv requirements.txt.new requirements.txt
+          echo "changed=true" >> $GITHUB_OUTPUT
           popd
 
-      - name: Run conflict check
+      - name: Upload updated requirements
+        if: steps.check.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: updated-reqs
+          path: flipper-pineapple-manager/requirements.txt
+
+  test:
+    name: Test updated requirements
+    needs: generate
+    if: needs.generate.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download updated requirements
+        uses: actions/download-artifact@v4
+        with:
+          name: updated-reqs
+          path: flipper-pineapple-manager
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install requirements
         run: |
-          pushd flipper-pineapple-manager
-          python -m pip install -r requirements.txt
-          python -m pip check || echo "pip check reported issues; maintainers should review"
-          popd
+          python -m pip install --upgrade pip
+          python -m pip install -r flipper-pineapple-manager/requirements.txt
 
-      - name: Run tests (if present)
+      - name: pip check
+        run: |
+          python -m pip check
+
+      - name: Run tests
         run: |
           if [ -d "flipper-pineapple-manager/tests" ]; then
             pushd flipper-pineapple-manager
-            python -m pip install -r requirements.txt
             if command -v pytest >/dev/null 2>&1; then
-              pytest -q || echo "Tests failed; review required"
+              pytest -q
             else
-              echo "No pytest available; consider adding tests"
+              echo "No pytest available; skipping tests"
             fi
             popd
           else
             echo "No tests detected; skipping test step"
           fi
+
+  create-pr:
+    name: Create Draft Pull Request
+    needs: [generate, test]
+    if: needs.generate.outputs.changed == 'true' && needs.test.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download updated requirements
+        uses: actions/download-artifact@v4
+        with:
+          name: updated-reqs
+          path: flipper-pineapple-manager
+
+      - name: Commit updated requirements
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b auto/safe-deps-update-${{ github.run_id }}
+          git add flipper-pineapple-manager/requirements.txt
+          git commit -m "chore(deps): safe monthly update (draft)" || echo "No changes to commit"
+          git push --set-upstream origin HEAD
 
       - name: Create Draft Pull Request
         uses: peter-evans/create-pull-request@v5
@@ -72,8 +137,8 @@ jobs:
 
             Actions performed automatically:
             - Upgraded installed packages and re-pinned `requirements.txt` via `pip freeze`.
-            - Ran `python -m pip check` to detect conflicts.
-            - Ran tests if a `tests/` directory exists and `pytest` is available.
+            - Ran `python -m pip check` across Python versions to detect conflicts.
+            - Ran tests across Python versions if a `tests/` directory exists and `pytest` is available.
 
             Please review and test before merging.
           labels: "auto-deps-draft"
