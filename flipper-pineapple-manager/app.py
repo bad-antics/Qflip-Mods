@@ -196,16 +196,23 @@ def _auto_connect_worker():
             time.sleep(max(1, AUTO_CONNECT_INTERVAL))
 
 
-# Ensure background worker is started once before first request
-@app.before_first_request
+# Ensure background worker is started once (use before_request guard for compatibility)
+_auto_worker_started = False
+@app.before_request
 def _start_auto_connect():
-    import threading
+    global _auto_worker_started
+    if _auto_worker_started:
+        return None
     # Start the worker only if either auto-connect flag is enabled
     if not (AUTO_CONNECT_FLIPPER or AUTO_CONNECT_PINEAPPLE):
         logger.info('Auto-connect disabled by configuration')
-        return
+        _auto_worker_started = True
+        return None
+    import threading
     worker = threading.Thread(target=_auto_connect_worker, daemon=True, name='auto-connect')
     worker.start()
+    _auto_worker_started = True
+    return None
 
 # Routes
 @app.route('/')
