@@ -16,9 +16,14 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # === Configuration (override via config.py or environment) ===
-FLIPPER_PORT = os.getenv('FLIPPER_PORT', '/dev/ttyACM0')  # Linux/Mac; Windows: 'COM3'
+FLIPPER_PORT = os.getenv('FLIPPER_PORT', 'COM3' if os.name == 'nt' else '/dev/ttyACM0')  # default per OS; override via env
 FLIPPER_BAUD = 230400
 FLIPPER_TIMEOUT = 2
+
+# Auto-connect controls
+AUTO_CONNECT_FLIPPER = os.getenv('AUTO_CONNECT_FLIPPER', 'true').lower() in ('1','true','yes')
+AUTO_CONNECT_PINEAPPLE = os.getenv('AUTO_CONNECT_PINEAPPLE', 'true').lower() in ('1','true','yes')
+AUTO_CONNECT_INTERVAL = int(os.getenv('AUTO_CONNECT_INTERVAL', '10'))  # seconds between checks
 
 PINEAPPLE_URL = os.getenv('PINEAPPLE_URL', 'http://172.16.42.1:1471')
 PINEAPPLE_USERNAME = os.getenv('PINEAPPLE_USER', 'root')
@@ -32,21 +37,55 @@ if os.path.exists('config.py'):
 flipper_connected = False
 flipper_ser = None
 
-def connect_flipper():
-    global flipper_ser, flipper_connected
-    try:
-        if flipper_ser and flipper_ser.is_open:
-            flipper_ser.close()
-        flipper_ser = serial.Serial(FLIPPER_PORT, FLIPPER_BAUD, timeout=FLIPPER_TIMEOUT)
-        flipper_connected = True
-        logger.info("Flipper Zero connected")
-        return True
-    except Exception as e:
-        logger.error(f"Flipper connection failed: {e}")
-        flipper_connected = False
-        return False
+# Pineapple token (global fallback for background worker) and locks
+pineapple_token = None
+_state_lock = __import__('threading').Lock()
 
-connect_flipper()
+def connect_flipper():
+    """Attempt to open configured FLIPPER_PORT, and if that fails, try to auto-detect serial ports.
+    Returns True on successful open and False otherwise.
+    """
+    global flipper_ser, flipper_connected
+    import threading
+    with _state_lock:
+        try:
+            # If a specific port is configured, try it first
+            try_ports = [FLIPPER_PORT] if FLIPPER_PORT else []
+            # Append all available ports to try auto-detect
+            try:
+                from serial.tools import list_ports
+                for p in list_ports.comports():
+                    if p.device not in try_ports:
+                        try_ports.append(p.device)
+            except Exception:
+                logger.debug('Could not enumerate serial ports for auto-detect')
+
+            for port in try_ports:
+                if not port:
+                    continue
+                try:
+                    if flipper_ser and flipper_ser.is_open:
+                        flipper_ser.close()
+                    logger.info(f'Trying Flipper on port {port}')
+                    candidate = serial.Serial(port, FLIPPER_BAUD, timeout=FLIPPER_TIMEOUT)
+                    # Optionally perform a quick handshake (non-blocking)
+                    time.sleep(0.1)
+                    if candidate.is_open:
+                        flipper_ser = candidate
+                        flipper_connected = True
+                        logger.info(f"Flipper Zero connected on {port}")
+                        return True
+                except Exception as e:
+                    logger.debug(f"Failed to open {port}: {e}")
+            # If none succeeded
+            flipper_connected = False
+            return False
+        except Exception as e:
+            logger.error(f"Flipper connection failed: {e}")
+            flipper_connected = False
+            return False
+
+# Do not auto-connect on import; connect on-demand when a route needs the device
 
 def with_flipper(func):
     @wraps(func)
@@ -74,15 +113,38 @@ def send_flipper_command(command):
         raise
 
 def get_pineapple_token():
-    if 'pineapple_token' in session:
-        return session['pineapple_token']
+    """Return a valid pineapple token.
+    Prefer session token (per-user), otherwise fall back to global token retrieved by the background worker.
+    """
+    global pineapple_token
+    # Try session token when a request context exists
+    try:
+        if 'pineapple_token' in session:
+            return session['pineapple_token']
+    except RuntimeError:
+        # No request context, ignore
+        pass
+
+    # Fallback to global token
+    with _state_lock:
+        if pineapple_token:
+            return pineapple_token
+
+    # If nothing yet, try to fetch a token (non-session) and store globally
     try:
         resp = requests.post(f'{PINEAPPLE_URL}/api/login',
                              json={'username': PINEAPPLE_USERNAME, 'password': PINEAPPLE_PASSWORD},
                              timeout=5)
-        if resp.status_code == 200 and 'token' in resp.json():
-            session['pineapple_token'] = resp.json()['token']
-            return session['pineapple_token']
+        if resp.status_code == 200:
+            try:
+                data = resp.json()
+                token = data.get('token')
+                if token:
+                    with _state_lock:
+                        pineapple_token = token
+                    return token
+            except ValueError:
+                logger.error('Pineapple login returned non-JSON response')
     except Exception as e:
         logger.error(f"Pineapple login failed: {e}")
     return None
@@ -95,13 +157,55 @@ def pineapple_api_call(endpoint, method='GET', data=None, timeout=10):
     url = f'{PINEAPPLE_URL}{endpoint}'
     try:
         resp = requests.request(method, url, headers=headers, json=data, timeout=timeout)
-        return resp.json() if resp.status_code == 200 else {'error': f'{resp.status_code}: {resp.text}'}
+        try:
+            return resp.json() if resp.status_code == 200 else {'error': f'{resp.status_code}: {resp.text}'}
+        except ValueError:
+            # Return text if not JSON
+            return {'result': resp.text}
     except requests.Timeout:
         return {'error': 'Pineapple request timed out'}
     except requests.ConnectionError:
         return {'error': 'Cannot reach WiFi Pineapple'}
     except Exception as e:
         return {'error': str(e)}
+
+# Background auto-connect worker
+
+def _auto_connect_worker():
+    """Background loop that periodically attempts to connect to the Flipper and Pineapple when disabled.
+    Runs as a daemon thread and respects the AUTO_CONNECT_* flags.
+    """
+    logger.info('Auto-connect worker started (interval=%s)', AUTO_CONNECT_INTERVAL)
+    while True:
+        try:
+            if AUTO_CONNECT_FLIPPER and not flipper_connected:
+                logger.debug('Auto-connect: attempting flipper connection')
+                connect_flipper()
+            if AUTO_CONNECT_PINEAPPLE:
+                # Try to get a token and store globally
+                t = None
+                try:
+                    t = get_pineapple_token()
+                except Exception:
+                    t = None
+                if t:
+                    logger.debug('Auto-connect: pineappple auth succeeded')
+            time.sleep(AUTO_CONNECT_INTERVAL)
+        except Exception as e:
+            logger.error('Auto-connect worker error: %s', e)
+            time.sleep(max(1, AUTO_CONNECT_INTERVAL))
+
+
+# Ensure background worker is started once before first request
+@app.before_first_request
+def _start_auto_connect():
+    import threading
+    # Start the worker only if either auto-connect flag is enabled
+    if not (AUTO_CONNECT_FLIPPER or AUTO_CONNECT_PINEAPPLE):
+        logger.info('Auto-connect disabled by configuration')
+        return
+    worker = threading.Thread(target=_auto_connect_worker, daemon=True, name='auto-connect')
+    worker.start()
 
 # Routes
 @app.route('/')
@@ -151,7 +255,7 @@ def flipper_subghz_tx():
         cmd = f"subghz tx {key} {data.get('freq', '433920000')} {data.get('te', '100')} {data.get('repeat', '10')} 0"
     elif action == 'from_file':
         path = data.get('path', '').strip()
-        if not path.startswith('/'):
+        if not path or not os.path.isabs(path):
             return jsonify({'error': 'Invalid file path'})
         cmd = f"subghz tx_from_file {path} {data.get('repeat', '1')} 0"
     elif action == 'raw':
