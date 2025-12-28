@@ -56,6 +56,11 @@ def connect_flipper():
             try:
                 from serial.tools import list_ports
                 for p in list_ports.comports():
+                    # log detailed device metadata when available
+                    try:
+                        logger.debug('Found serial port: %s (vid=%s pid=%s desc=%s)', p.device, getattr(p, 'vid', None), getattr(p, 'pid', None), getattr(p, 'description', None))
+                    except Exception:
+                        logger.debug('Found serial port: %s', getattr(p, 'device', None))
                     if p.device not in try_ports:
                         try_ports.append(p.device)
             except Exception:
@@ -219,6 +224,33 @@ def _start_auto_connect():
     worker.start()
     _auto_worker_started = True
     return None
+
+# Utility: list serial devices with metadata
+def list_serial_devices():
+    out = []
+    try:
+        from serial.tools import list_ports
+        for p in list_ports.comports():
+            out.append({
+                'device': getattr(p, 'device', None),
+                'vid': getattr(p, 'vid', None),
+                'pid': getattr(p, 'pid', None),
+                'description': getattr(p, 'description', None),
+                'manufacturer': getattr(p, 'manufacturer', None)
+            })
+    except Exception:
+        logger.debug('Could not enumerate serial ports')
+    return out
+
+
+# Status/devices endpoint
+@app.route('/status/devices')
+def status_devices():
+    devices = list_serial_devices()
+    connected_port = getattr(flipper_ser, 'port', None) if flipper_ser else None
+    pineapple_ok = bool(get_pineapple_token())
+    return jsonify({'devices': devices, 'flipper_connected_port': connected_port, 'pineapple_authenticated': pineapple_ok})
+
 
 # Routes
 @app.route('/')
