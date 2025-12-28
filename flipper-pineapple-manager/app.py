@@ -3,6 +3,7 @@ from flask_bootstrap import Bootstrap
 import serial
 import requests
 import time
+from datetime import datetime
 import logging
 from functools import wraps
 import os
@@ -231,12 +232,30 @@ def pineapple():
 def flipper_monitor():
     if not flipper_connected:
         return jsonify({'error': 'Not connected', 'connected': False})
-    return jsonify({
-        'info': send_flipper_command('info device'),
-        'uptime': send_flipper_command('uptime'),
-        'memory': send_flipper_command('free'),
-        'connected': True
-    })
+
+    # Gather raw responses
+    info_raw = send_flipper_command('info device') or ''
+    uptime_raw = send_flipper_command('uptime') or ''
+    memory_raw = send_flipper_command('free') or ''
+
+    # Normalize into structured fields
+    info_lines = [line.strip() for line in info_raw.splitlines() if line.strip()]
+
+    result = {
+        'connected': True,
+        'port': getattr(flipper_ser, 'port', None) if flipper_ser else None,
+        'info': info_lines,
+        'uptime': uptime_raw.strip() if isinstance(uptime_raw, str) else uptime_raw,
+        'memory': memory_raw.strip() if isinstance(memory_raw, str) else memory_raw,
+        'last_updated': datetime.utcnow().isoformat() + 'Z',
+        'raw': {
+            'info': info_raw,
+            'uptime': uptime_raw,
+            'memory': memory_raw
+        }
+    }
+
+    return jsonify(result)
 
 @app.route('/flipper_command', methods=['POST'])
 def flipper_command():

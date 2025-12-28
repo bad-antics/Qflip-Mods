@@ -1,15 +1,28 @@
-{% extends "bootstrap/base.html" %}
+{% extends "base.html" %}
 {% block title %}Flipper Zero Control{% endblock %}
 {% block content %}
-{% include 'nav.html' %}
 <div class="container mt-4">
-  <h1>Flipper Zero Management</h1>
+  <h1>Flipper Zero — <span class="muted">Management</span></h1>
   <div id="monitor" class="card mb-3">
     <div class="card-body">
-      <h5>Real-Time Monitoring</h5>
-      <pre id="monitor-output" class="bg-light p-3">Loading...</pre>
-      <div id="connection-status" class="alert alert-info">Checking connection...</div>
-      <button class="btn btn-primary" onclick="refreshFlipperMonitor()">Refresh</button>
+      <h5 class="panel-title">Real-Time Monitoring</h5>
+      <div id="monitor-body" class="mb-2">
+        <dl class="row mb-0">
+          <dt class="col-sm-3">Port</dt><dd class="col-sm-9" id="monitor-port">—</dd>
+          <dt class="col-sm-3">Info</dt><dd class="col-sm-9" id="monitor-info">—</dd>
+          <dt class="col-sm-3">Uptime</dt><dd class="col-sm-9" id="monitor-uptime">—</dd>
+          <dt class="col-sm-3">Memory</dt><dd class="col-sm-9" id="monitor-memory">—</dd>
+          <dt class="col-sm-3">Last Updated</dt><dd class="col-sm-9" id="monitor-last">—</dd>
+        </dl>
+        <pre id="monitor-raw" class="mt-2 p-2" style="display:none;background:#020518;color:#9ff;"></pre>
+      </div>
+      <div id="connection-status" class="alert" style="background:rgba(0,229,255,0.04);border:1px solid rgba(0,229,255,0.06);color:var(--muted);">Checking connection...</div>
+      <div class="btn-group mt-2" role="group">
+        <button class="btn btn-outline-light" onclick="refreshFlipperMonitor()">Refresh</button>
+        <button class="btn btn-outline-secondary" id="toggle-raw">Show raw</button>
+      </div>
+
+
     </div>
   </div>
   <div class="card mb-3">
@@ -74,9 +87,31 @@
   </div>
 </div>
 <script>
+function escapeHtml(s) {
+  return String(s).replace(/[&<>\"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
 function refreshFlipperMonitor() {
   fetch('/flipper_monitor').then(res => res.json()).then(data => {
-    document.getElementById('monitor-output').textContent = JSON.stringify(data, null, 2);
+    if (!data || !data.connected) {
+      document.getElementById('monitor-port').textContent = '—';
+      document.getElementById('monitor-info').textContent = data && data.error ? data.error : 'Not connected';
+      document.getElementById('monitor-uptime').textContent = '—';
+      document.getElementById('monitor-memory').textContent = '—';
+      document.getElementById('monitor-last').textContent = new Date().toISOString();
+      document.getElementById('monitor-raw').textContent = data && data.raw ? JSON.stringify(data.raw, null, 2) : '';
+      return;
+    }
+
+    document.getElementById('monitor-port').textContent = data.port || '—';
+    document.getElementById('monitor-info').innerHTML = data.info && data.info.length ? data.info.map(escapeHtml).join('<br>') : '—';
+    document.getElementById('monitor-uptime').textContent = data.uptime || '—';
+    document.getElementById('monitor-memory').textContent = data.memory || '—';
+    document.getElementById('monitor-last').textContent = data.last_updated || new Date().toISOString();
+    document.getElementById('monitor-raw').textContent = JSON.stringify(data.raw || {}, null, 2);
+  }).catch(err => {
+    document.getElementById('connection-status').className = 'alert alert-danger';
+    document.getElementById('connection-status').textContent = 'Error contacting server';
   });
 }
 function sendQuickCommand(cmd) {
@@ -91,17 +126,29 @@ document.getElementById('flipper-form').addEventListener('submit', e => {
 });
 function updateConnectionStatus() {
   fetch('/flipper_monitor').then(res => res.json()).then(data => {
-    if (data.connected) {
+    if (data && data.connected) {
       document.getElementById('connection-status').className = 'alert alert-success';
       document.getElementById('connection-status').textContent = 'Flipper Zero connected';
     } else {
       document.getElementById('connection-status').className = 'alert alert-danger';
       document.getElementById('connection-status').textContent = 'Flipper Zero disconnected';
     }
-    document.getElementById('monitor-output').textContent = data.error || JSON.stringify(data, null, 2);
+    // Update the structured monitor fields
+    try { refreshFlipperMonitor(); } catch (e) { /* ignore */ }
   }).catch(err => {
     document.getElementById('connection-status').className = 'alert alert-danger';
     document.getElementById('connection-status').textContent = 'Error contacting server';
+  });
+}
+
+// Toggle raw output visibility
+if (document.getElementById('toggle-raw')) {
+  document.getElementById('toggle-raw').addEventListener('click', () => {
+    const el = document.getElementById('monitor-raw');
+    const btn = document.getElementById('toggle-raw');
+    if (el.style.display === 'none' || !el.style.display) {
+      el.style.display = 'block'; btn.textContent = 'Hide raw';
+    } else { el.style.display = 'none'; btn.textContent = 'Show raw'; }
   });
 }
 function showError(message) {
