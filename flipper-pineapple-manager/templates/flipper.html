@@ -5,21 +5,26 @@
   <h1>Flipper Zero — <span class="muted">Management</span></h1>
   <div id="monitor" class="card mb-3">
     <div class="card-body">
+      <style>
+        .typing { border-right: 2px solid var(--accent); animation: blink 1s steps(1) infinite; }
+        @keyframes blink { 50% { opacity: 0 } }
+      </style>
       <h5 class="panel-title">Real-Time Monitoring</h5>
       <div id="monitor-body" class="mb-2">
         <dl class="row mb-0">
           <dt class="col-sm-3">Port</dt><dd class="col-sm-9" id="monitor-port">—</dd>
-          <dt class="col-sm-3">Info</dt><dd class="col-sm-9" id="monitor-info">—</dd>
+          <dt class="col-sm-3">Info</dt><dd class="col-sm-9 typewriter" id="monitor-info" style="white-space:pre-wrap">—</dd>
           <dt class="col-sm-3">Uptime</dt><dd class="col-sm-9" id="monitor-uptime">—</dd>
           <dt class="col-sm-3">Memory</dt><dd class="col-sm-9" id="monitor-memory">—</dd>
           <dt class="col-sm-3">Last Updated</dt><dd class="col-sm-9" id="monitor-last">—</dd>
         </dl>
-        <pre id="monitor-raw" class="mt-2 p-2" style="display:none;background:#020518;color:#9ff;"></pre>
+        <pre id="monitor-raw" class="mt-2 p-2 typewriter" style="display:none;background:#020518;color:#9ff;white-space:pre-wrap"></pre>
       </div>
       <div id="connection-status" class="alert" style="background:rgba(0,229,255,0.04);border:1px solid rgba(0,229,255,0.06);color:var(--muted);">Checking connection...</div>
       <div class="btn-group mt-2" role="group">
         <button class="btn btn-outline-light" onclick="refreshFlipperMonitor()">Refresh</button>
         <button class="btn btn-outline-secondary" id="toggle-raw">Show raw</button>
+        <button class="btn btn-outline-secondary" id="toggle-typewriter">Disable typewriter</button>
       </div>
 
 
@@ -91,24 +96,48 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>\"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
 
+let typewriterEnabled = true;
+function typewriterPrint(el, text, speed=12) {
+  if (!el) return;
+  if (!typewriterEnabled) { el.textContent = text; el.classList.remove('typing'); return; }
+  if (el._tw_timer) { clearInterval(el._tw_timer); el._tw_timer = null; }
+  el.textContent = '';
+  el.classList.add('typing');
+  let i = 0;
+  el._tw_timer = setInterval(() => {
+    el.textContent += text.charAt(i);
+    i++;
+    if (i >= text.length) { clearInterval(el._tw_timer); el._tw_timer = null; el.classList.remove('typing'); }
+  }, speed);
+}
+
 function refreshFlipperMonitor() {
   fetch('/flipper_monitor').then(res => res.json()).then(data => {
+    const portEl = document.getElementById('monitor-port');
+    const infoEl = document.getElementById('monitor-info');
+    const uptimeEl = document.getElementById('monitor-uptime');
+    const memoryEl = document.getElementById('monitor-memory');
+    const lastEl = document.getElementById('monitor-last');
+    const rawEl = document.getElementById('monitor-raw');
+
     if (!data || !data.connected) {
-      document.getElementById('monitor-port').textContent = '—';
-      document.getElementById('monitor-info').textContent = data && data.error ? data.error : 'Not connected';
-      document.getElementById('monitor-uptime').textContent = '—';
-      document.getElementById('monitor-memory').textContent = '—';
-      document.getElementById('monitor-last').textContent = new Date().toISOString();
-      document.getElementById('monitor-raw').textContent = data && data.raw ? JSON.stringify(data.raw, null, 2) : '';
+      portEl.textContent = '—';
+      const err = data && data.error ? data.error : 'Not connected';
+      typewriterPrint(infoEl, err);
+      uptimeEl.textContent = '—';
+      memoryEl.textContent = '—';
+      lastEl.textContent = new Date().toISOString();
+      typewriterPrint(rawEl, data && data.raw ? JSON.stringify(data.raw, null, 2) : '');
       return;
     }
 
-    document.getElementById('monitor-port').textContent = data.port || '—';
-    document.getElementById('monitor-info').innerHTML = data.info && data.info.length ? data.info.map(escapeHtml).join('<br>') : '—';
-    document.getElementById('monitor-uptime').textContent = data.uptime || '—';
-    document.getElementById('monitor-memory').textContent = data.memory || '—';
-    document.getElementById('monitor-last').textContent = data.last_updated || new Date().toISOString();
-    document.getElementById('monitor-raw').textContent = JSON.stringify(data.raw || {}, null, 2);
+    portEl.textContent = data.port || '—';
+    const infoText = data.info && data.info.length ? data.info.join('\n') : '—';
+    typewriterPrint(infoEl, infoText);
+    uptimeEl.textContent = data.uptime || '—';
+    memoryEl.textContent = data.memory || '—';
+    lastEl.textContent = data.last_updated || new Date().toISOString();
+    typewriterPrint(rawEl, JSON.stringify(data.raw || {}, null, 2));
   }).catch(err => {
     document.getElementById('connection-status').className = 'alert alert-danger';
     document.getElementById('connection-status').textContent = 'Error contacting server';
@@ -117,13 +146,32 @@ function refreshFlipperMonitor() {
 function sendQuickCommand(cmd) {
   fetch('/flipper_command', {method: 'POST', body: new URLSearchParams({command: cmd})})
     .then(res => res.json()).then(data => {
-      document.getElementById('command-output').textContent = data.result || data.error;
+      const out = data.result || data.error;
+      typewriterPrint(document.getElementById('command-output'), out);
     });
 }
 document.getElementById('flipper-form').addEventListener('submit', e => {
   e.preventDefault();
   sendQuickCommand(document.getElementById('command').value);
 });
+
+// Toggle raw and typewriter buttons
+if (document.getElementById('toggle-raw')) {
+  document.getElementById('toggle-raw').addEventListener('click', () => {
+    const el = document.getElementById('monitor-raw');
+    const btn = document.getElementById('toggle-raw');
+    if (el.style.display === 'none' || !el.style.display) {
+      el.style.display = 'block'; btn.textContent = 'Hide raw';
+    } else { el.style.display = 'none'; btn.textContent = 'Show raw'; }
+  });
+}
+if (document.getElementById('toggle-typewriter')) {
+  document.getElementById('toggle-typewriter').addEventListener('click', () => {
+    const btn = document.getElementById('toggle-typewriter');
+    typewriterEnabled = !typewriterEnabled;
+    btn.textContent = typewriterEnabled ? 'Disable typewriter' : 'Enable typewriter';
+  });
+}
 function updateConnectionStatus() {
   fetch('/flipper_monitor').then(res => res.json()).then(data => {
     if (data && data.connected) {
@@ -152,12 +200,14 @@ if (document.getElementById('toggle-raw')) {
   });
 }
 function showError(message) {
-  document.getElementById('subghz-output').textContent = message;
-  document.getElementById('subghz-output').className = 'bg-danger text-white p-2';
+  const el = document.getElementById('subghz-output');
+  el.className = 'bg-danger text-white p-2';
+  typewriterPrint(el, message);
 }
 function showSuccess(message) {
-  document.getElementById('subghz-output').textContent = message;
-  document.getElementById('subghz-output').className = 'bg-success text-white p-2';
+  const el = document.getElementById('subghz-output');
+  el.className = 'bg-success text-white p-2';
+  typewriterPrint(el, message);
 }
 function subghzAction(action) {
   fetch('/flipper_subghz_tx', {
