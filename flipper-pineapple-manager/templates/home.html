@@ -1,17 +1,10 @@
-{% extends "bootstrap/base.html" %}
-{% block title %}Device Manager{% endblock %}
+{% extends "base.html" %}
+{% block title %}Welcome — Bad-Antics{% endblock %}
 {% block content %}
-<nav class="navbar navbar-expand-lg navbar-light bg-light">
-  <a class="navbar-brand" href="/">Device Manager</a>
-  <div class="collapse navbar-collapse">
-    <ul class="navbar-nav mr-auto">
-      <li class="nav-item"><a class="nav-link" href="/flipper">Flipper Zero</a></li>
-      <li class="nav-item"><a class="nav-link" href="/pineapple">WiFi Pineapple</a></li>
-    </ul>
-  </div>
-</nav>
-<div class="container mt-4">
-  <h1>Welcome to the Device Management Interface</h1>
-  <p>Select a device from the navigation bar to manage it.</p>
+<div class="jumbotron py-5 text-center">
+  <h1 class="display-4">BAD-ANTICS Device Manager</h1>
+  <p class="lead muted">A minimal device dashboard — inspired by ytcracker.com. <em>Not affiliated</em>.</p>
+  <p>Shoutouts: <strong>Sleep</strong>, <strong>Domo</strong>, and <strong>Anxiety</strong> — Credits: <strong>Bad-Antics</strong></p>
+  <a href="/flipper" class="btn btn-outline-light btn-lg">Manage Devices</a>
 </div>
 {% endblock %}
