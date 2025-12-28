@@ -93,13 +93,18 @@ def with_flipper(func):
     def wrapper(*args, **kwargs):
         if not flipper_connected:
             if not connect_flipper():
-                return jsonify({'error': 'Flipper Zero not connected'})
+                return jsonify({'error': 'Flipper Zero not connected'}), 503
         try:
             return func(*args, **kwargs)
         except Exception as e:
-            logger.error(f"Flipper error: {e}")
-            connect_flipper()
-            return jsonify({'error': str(e)})
+            logger.exception("Flipper error during command")
+            # Try to reconnect asynchronously to avoid blocking the request
+            try:
+                import threading
+                threading.Thread(target=connect_flipper, daemon=True).start()
+            except Exception:
+                logger.debug('Failed to start reconnect thread')
+            return jsonify({'error': str(e)}), 500
     return wrapper
 
 @with_flipper
@@ -233,10 +238,23 @@ def flipper_monitor():
     if not flipper_connected:
         return jsonify({'error': 'Not connected', 'connected': False})
 
+    error_msg = None
     # Gather raw responses
-    info_raw = send_flipper_command('info device') or ''
-    uptime_raw = send_flipper_command('uptime') or ''
-    memory_raw = send_flipper_command('free') or ''
+    try:
+        info_raw = send_flipper_command('info device') or ''
+    except Exception as e:
+        info_raw = ''
+        error_msg = str(e)
+    try:
+        uptime_raw = send_flipper_command('uptime') or ''
+    except Exception as e:
+        uptime_raw = ''
+        error_msg = error_msg or str(e)
+    try:
+        memory_raw = send_flipper_command('free') or ''
+    except Exception as e:
+        memory_raw = ''
+        error_msg = error_msg or str(e)
 
     # Normalize into structured fields
     info_lines = [line.strip() for line in info_raw.splitlines() if line.strip()]
@@ -255,6 +273,9 @@ def flipper_monitor():
         }
     }
 
+    if error_msg:
+        result['error'] = error_msg
+
     return jsonify(result)
 
 @app.route('/flipper_command', methods=['POST'])
@@ -266,7 +287,9 @@ def flipper_command():
 
 @app.route('/flipper_subghz_tx', methods=['POST'])
 def flipper_subghz_tx():
-    data = request.get_json()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Invalid or missing JSON payload'}), 400
     action = data.get('action')
     cmd = ""
 
@@ -277,22 +300,26 @@ def flipper_subghz_tx():
     elif action == 'custom_key':
         key = data.get('key', '').strip().upper()
         if not key or not all(c in '0123456789ABCDEF' for c in key):
-            return jsonify({'error': 'Invalid hex key'})
+            return jsonify({'error': 'Invalid hex key'}), 400
         cmd = f"subghz tx {key} {data.get('freq', '433920000')} {data.get('te', '100')} {data.get('repeat', '10')} 0"
     elif action == 'from_file':
         path = data.get('path', '').strip()
         if not path or not os.path.isabs(path):
-            return jsonify({'error': 'Invalid file path'})
+            return jsonify({'error': 'Invalid file path'}), 400
         cmd = f"subghz tx_from_file {path} {data.get('repeat', '1')} 0"
     elif action == 'raw':
         raw = data.get('raw_data', '').strip()
         if not raw:
-            return jsonify({'error': 'Raw data required'})
+            return jsonify({'error': 'Raw data required'}), 400
         cmd = f"subghz raw tx {data.get('freq', '433920000')} {raw}"
     else:
-        return jsonify({'error': 'Unknown action'})
+        return jsonify({'error': 'Unknown action'}), 400
 
-    return jsonify({'result': send_flipper_command(cmd)})
+    try:
+        res = send_flipper_command(cmd)
+        return jsonify({'result': res})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/pineapple_status')
 def pineapple_status():
